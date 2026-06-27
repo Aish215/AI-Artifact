@@ -1,4 +1,7 @@
 import { useState, useEffect } from "react";
+import { signInWithPopup, signOut, onAuthStateChanged } from "firebase/auth";
+import { doc, getDoc, setDoc } from "firebase/firestore";
+import { auth, provider, db } from "./firebase";
 
 const DAYS = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
 const FREQ_OPTIONS = ["Daily","Weekly","Custom"];
@@ -15,10 +18,6 @@ const REMARKS = [
   {msg:"🎯 Bullseye!",color:"#14b8a6"},
   {msg:"👏 Brilliant!",color:"#f59e0b"},
   {msg:"🦸 Superhero vibes!",color:"#6366f1"},
-];
-const DEMO_ACCOUNTS = [
-  {name:"Aishwarya",email:"aishwarya@gmail.com",avatar:"A"},
-  {name:"Guest User",email:"guest@gmail.com",avatar:"G"},
 ];
 
 const getToday = () => new Date().toISOString().slice(0,10);
@@ -47,10 +46,11 @@ const emptyForm = () => ({name:"",emoji:"💪",color:COLORS[0],freq:"Daily",days
 
 export default function App() {
   const [dark,setDark] = useState(false);
-  const [screen,setScreen] = useState("login");
-  const [session,setSession] = useState(null);
+  const [user,setUser] = useState(null);
+  const [authLoading,setAuthLoading] = useState(true);
+  const [screen,setScreen] = useState("home");
   const [habits,setHabits] = useState([]);
-  const [loading,setLoading] = useState(false);
+  const [habitsLoading,setHabitsLoading] = useState(false);
   const [habitForm,setHabitForm] = useState(null);
   const [selected,setSelected] = useState(null);
   const [view,setView] = useState("today");
@@ -62,63 +62,72 @@ export default function App() {
   const text=dark?"#f1f5f9":"#111", sub=dark?"#94a3b8":"#888";
   const mutedBg=dark?"#283548":"#f3f4f6", mutedText=dark?"#94a3b8":"#555";
 
-  // Load habits from persistent storage when user logs in
-  const loadHabits = async (email) => {
-    setLoading(true);
+  // Listen for auth state changes
+  useEffect(()=>{
+    const unsub = onAuthStateChanged(auth, async (u)=>{
+      setUser(u);
+      setAuthLoading(false);
+      if(u) await loadHabits(u.uid);
+    });
+    return ()=>unsub();
+  },[]);
+
+  // Load habits from Firestore
+  const loadHabits = async (uid) => {
+    setHabitsLoading(true);
     try {
-      const res = await window.storage.get(`habits:${email}`);
-      const parsed = res ? JSON.parse(res.value) : [];
-      setHabits(parsed);
-    } catch {
-      setHabits([]);
-    }
-    setLoading(false);
+      const ref = doc(db,"users",uid);
+      const snap = await getDoc(ref);
+      if(snap.exists()) setHabits(snap.data().habits || []);
+      else setHabits([]);
+    } catch(e){ console.error(e); setHabits([]); }
+    setHabitsLoading(false);
   };
 
-  // Save habits to persistent storage whenever they change
-  const saveHabits = async (email, data) => {
+  // Save habits to Firestore
+  const saveHabits = async (uid, data) => {
     try {
-      await window.storage.set(`habits:${email}`, JSON.stringify(data));
-    } catch(e) {
-      console.error("Save failed", e);
-    }
+      await setDoc(doc(db,"users",uid),{habits:data},{merge:true});
+    } catch(e){ console.error(e); }
   };
 
   const updateHabits = (next) => {
     setHabits(next);
-    if(session) saveHabits(session.email, next);
+    if(user) saveHabits(user.uid, next);
   };
 
-  const loginWith = async (acc) => {
-    setSession(acc);
-    setScreen("home");
-    await loadHabits(acc.email);
+  const loginWithGoogle = async () => {
+    try { await signInWithPopup(auth, provider); }
+    catch(e){ console.error(e); }
   };
 
-  const logout = () => { setSession(null); setHabits([]); setScreen("login"); };
+  const logout = async () => {
+    await signOut(auth);
+    setHabits([]); setScreen("home");
+  };
 
   const toggleComplete = (id, date=getToday()) => {
     let completing = false;
-    const next = habits.map(h => {
-      if(h.id!==id) return h;
-      const c = h.completions||[];
-      const done = c.includes(date);
-      if(!done) completing = true;
-      return {...h, completions: done ? c.filter(x=>x!==date) : [...c,date]};
+    const next = habits.map(h=>{
+      if(h.id!==id)return h;
+      const c=h.completions||[];
+      const done=c.includes(date);
+      if(!done) completing=true;
+      return{...h,completions:done?c.filter(x=>x!==date):[...c,date]};
     });
     updateHabits(next);
     if(completing){
-      const r = REMARKS[Math.floor(Math.random()*REMARKS.length)];
+      const r=REMARKS[Math.floor(Math.random()*REMARKS.length)];
       setRemark(r);
-      setTimeout(()=>setRemark(null), 2000);
+      setTimeout(()=>setRemark(null),2000);
     }
   };
 
   const saveHabit = () => {
-    if(!habitForm.name.trim()) return;
-    const next = habitForm.id
-      ? habits.map(h=>h.id===habitForm.id?{...habitForm}:h)
-      : [...habits,{...habitForm,id:Date.now().toString(),completions:[]}];
+    if(!habitForm.name.trim())return;
+    const next=habitForm.id
+      ?habits.map(h=>h.id===habitForm.id?{...habitForm}:h)
+      :[...habits,{...habitForm,id:Date.now().toString(),completions:[]}];
     updateHabits(next); setHabitForm(null); setScreen("home");
   };
 
@@ -127,15 +136,15 @@ export default function App() {
     setDeleteConfirm(null); setSelected(null); setScreen("home");
   };
 
-  const openAdd = () => { setHabitForm(emptyForm()); setScreen("add"); };
-  const openEdit = (h) => { setHabitForm({...h}); setScreen("add"); };
+  const openAdd = () => {setHabitForm(emptyForm());setScreen("add");};
+  const openEdit = (h) => {setHabitForm({...h});setScreen("add");};
 
   const today=getToday(), weekDates=getWeekDates();
-  const isDueToday = h => {
+  const isDueToday = h=>{
     const dow=new Date().getDay();
-    if(h.freq==="Daily") return true;
-    if(h.freq==="Weekly") return dow===0;
-    if(h.freq==="Custom") return (h.days||[]).includes(dow);
+    if(h.freq==="Daily")return true;
+    if(h.freq==="Weekly")return dow===0;
+    if(h.freq==="Custom")return(h.days||[]).includes(dow);
     return true;
   };
   const todayHabits=habits.filter(isDueToday);
@@ -146,13 +155,6 @@ export default function App() {
   const labelSt={display:"block",fontSize:13,fontWeight:600,color:mutedText,marginBottom:6};
   const hdrSt={display:"flex",justifyContent:"space-between",alignItems:"center",background:card,borderBottom:`1px solid ${border}`,position:"sticky",top:0,zIndex:10,padding:"14px 20px"};
 
-  const RemarkToast = () => remark ? (
-    <div style={{position:"fixed",top:80,left:"50%",transform:"translateX(-50%)",background:remark.color,color:"#fff",padding:"12px 28px",borderRadius:50,fontWeight:800,fontSize:18,boxShadow:"0 6px 24px #0003",zIndex:200,whiteSpace:"nowrap",animation:"popIn .3s ease"}}>
-      <style>{`@keyframes popIn{0%{transform:translateX(-50%) scale(0.5);opacity:0}70%{transform:translateX(-50%) scale(1.1)}100%{transform:translateX(-50%) scale(1);opacity:1}}`}</style>
-      {remark.msg}
-    </div>
-  ) : null;
-
   const GoogleIcon = () => (
     <svg width="18" height="18" viewBox="0 0 48 48">
       <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/>
@@ -161,6 +163,13 @@ export default function App() {
       <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.18 1.48-4.97 2.31-8.16 2.31-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/>
     </svg>
   );
+
+  const RemarkToast = () => remark?(
+    <div style={{position:"fixed",top:80,left:"50%",transform:"translateX(-50%)",background:remark.color,color:"#fff",padding:"12px 28px",borderRadius:50,fontWeight:800,fontSize:18,boxShadow:"0 6px 24px #0003",zIndex:200,whiteSpace:"nowrap",animation:"popIn .3s ease"}}>
+      <style>{`@keyframes popIn{0%{transform:translateX(-50%) scale(0.5);opacity:0}70%{transform:translateX(-50%) scale(1.1)}100%{transform:translateX(-50%) scale(1);opacity:1}}`}</style>
+      {remark.msg}
+    </div>
+  ):null;
 
   const DeleteModal = ({id,name}) => (
     <div style={{position:"fixed",inset:0,background:"#0008",zIndex:100,display:"flex",alignItems:"center",justifyContent:"center"}}>
@@ -175,28 +184,18 @@ export default function App() {
   );
 
   const Dashboard = () => {
-    const dates = dashRange==="weekly" ? getLast7Days() : getLast30Days();
-    const dayCounts = dates.map(d=>({
-      date:d, count:habits.reduce((a,h)=>(h.completions||[]).includes(d)?a+1:a,0),
-      label:dashRange==="weekly"?DAYS[new Date(d+"T00:00:00").getDay()].slice(0,3):new Date(d+"T00:00:00").getDate()
-    }));
+    const dates=dashRange==="weekly"?getLast7Days():getLast30Days();
+    const dayCounts=dates.map(d=>({date:d,count:habits.reduce((a,h)=>(h.completions||[]).includes(d)?a+1:a,0),label:dashRange==="weekly"?DAYS[new Date(d+"T00:00:00").getDay()].slice(0,3):new Date(d+"T00:00:00").getDate()}));
     const maxCount=Math.max(...dayCounts.map(d=>d.count),1);
     const totalCompletions=habits.reduce((a,h)=>(h.completions||[]).length+a,0);
     const bestStreak=habits.reduce((a,h)=>Math.max(a,calcLongest(h.completions)),0);
     const avgPerDay=dates.length?(dayCounts.reduce((a,d)=>a+d.count,0)/dates.length).toFixed(1):0;
-    const habitStats=habits.map(h=>{
-      const done=dates.filter(d=>(h.completions||[]).includes(d)).length;
-      return{...h,done,pct:dates.length?Math.round((done/dates.length)*100):0};
-    }).sort((a,b)=>b.pct-a.pct);
-
-    return (
+    const habitStats=habits.map(h=>{const done=dates.filter(d=>(h.completions||[]).includes(d)).length;return{...h,done,pct:dates.length?Math.round((done/dates.length)*100):0};}).sort((a,b)=>b.pct-a.pct);
+    return(
       <div style={{padding:"16px 20px 80px"}}>
         <div style={{display:"flex",gap:8,marginBottom:20}}>
           {["weekly","monthly"].map(r=>(
-            <button key={r} onClick={()=>setDashRange(r)}
-              style={{padding:"7px 20px",borderRadius:20,border:"none",background:dashRange===r?"#6366f1":mutedBg,color:dashRange===r?"#fff":mutedText,cursor:"pointer",fontWeight:700,fontSize:13}}>
-              {r==="weekly"?"Last 7 Days":"Last 30 Days"}
-            </button>
+            <button key={r} onClick={()=>setDashRange(r)} style={{padding:"7px 20px",borderRadius:20,border:"none",background:dashRange===r?"#6366f1":mutedBg,color:dashRange===r?"#fff":mutedText,cursor:"pointer",fontWeight:700,fontSize:13}}>{r==="weekly"?"Last 7 Days":"Last 30 Days"}</button>
           ))}
         </div>
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:20}}>
@@ -222,27 +221,34 @@ export default function App() {
         </div>
         <div style={{background:card,borderRadius:16,padding:"18px 16px",boxShadow:"0 1px 6px #0001"}}>
           <h3 style={{margin:"0 0 14px",fontSize:14,fontWeight:700,color:text}}>Habit Breakdown</h3>
-          {habitStats.length===0
-            ?<p style={{color:sub,fontSize:13,textAlign:"center"}}>No habits yet.</p>
-            :habitStats.map(h=>(
-              <div key={h.id} style={{marginBottom:14}}>
-                <div style={{display:"flex",justifyContent:"space-between",marginBottom:5}}>
-                  <span style={{fontSize:13,fontWeight:600,color:text}}>{h.emoji} {h.name}</span>
-                  <span style={{fontSize:12,color:sub}}>{h.done}/{dates.length} · {h.pct}%</span>
-                </div>
-                <div style={{height:8,background:mutedBg,borderRadius:99}}>
-                  <div style={{height:8,borderRadius:99,background:h.color,width:`${h.pct}%`,transition:"width .4s"}}/>
-                </div>
+          {habitStats.length===0?<p style={{color:sub,fontSize:13,textAlign:"center"}}>No habits yet.</p>:habitStats.map(h=>(
+            <div key={h.id} style={{marginBottom:14}}>
+              <div style={{display:"flex",justifyContent:"space-between",marginBottom:5}}>
+                <span style={{fontSize:13,fontWeight:600,color:text}}>{h.emoji} {h.name}</span>
+                <span style={{fontSize:12,color:sub}}>{h.done}/{dates.length} · {h.pct}%</span>
               </div>
-            ))
-          }
+              <div style={{height:8,background:mutedBg,borderRadius:99}}>
+                <div style={{height:8,borderRadius:99,background:h.color,width:`${h.pct}%`,transition:"width .4s"}}/>
+              </div>
+            </div>
+          ))}
         </div>
       </div>
     );
   };
 
+  // ---- AUTH LOADING ----
+  if(authLoading) return(
+    <div style={{minHeight:"100vh",background:bg,display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"system-ui,sans-serif"}}>
+      <div style={{textAlign:"center",color:sub}}>
+        <div style={{fontSize:40,marginBottom:12}}>🎯</div>
+        <p style={{fontSize:14}}>Loading HabitFlow...</p>
+      </div>
+    </div>
+  );
+
   // ---- LOGIN ----
-  if(screen==="login") return (
+  if(!user) return(
     <div style={{minHeight:"100vh",background:bg,display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"system-ui,sans-serif"}}>
       <div style={{background:card,borderRadius:20,padding:36,width:320,boxShadow:"0 4px 24px #0002",textAlign:"center"}}>
         <div style={{display:"flex",justifyContent:"flex-end",marginBottom:8}}>
@@ -250,33 +256,19 @@ export default function App() {
         </div>
         <div style={{fontSize:52,marginBottom:8}}>🎯</div>
         <h1 style={{margin:"0 0 6px",fontSize:26,fontWeight:800,color:text}}>HabitFlow</h1>
-        <p style={{margin:"0 0 28px",color:sub,fontSize:14}}>Build better habits, one day at a time</p>
-        <p style={{fontSize:13,color:sub,marginBottom:12}}>Sign in as</p>
-        {DEMO_ACCOUNTS.map(acc=>(
-          <button key={acc.email} onClick={()=>loginWith(acc)}
-            style={{...btnP,background:card,color:text,border:`1.5px solid ${border}`,display:"flex",alignItems:"center",gap:12,marginBottom:10,padding:"12px 16px"}}>
-            <div style={{width:36,height:36,borderRadius:"50%",background:"#6366f1",color:"#fff",display:"flex",alignItems:"center",justifyContent:"center",fontWeight:700,fontSize:16,flexShrink:0}}>{acc.avatar}</div>
-            <div style={{textAlign:"left"}}>
-              <div style={{fontWeight:700,fontSize:14,color:text}}>{acc.name}</div>
-              <div style={{fontSize:12,color:sub}}>{acc.email}</div>
-            </div>
-            <GoogleIcon/>
-          </button>
-        ))}
-        <div style={{display:"flex",alignItems:"center",gap:10,margin:"16px 0"}}>
-          <div style={{flex:1,height:1,background:border}}/><span style={{color:sub,fontSize:12}}>or</span><div style={{flex:1,height:1,background:border}}/>
-        </div>
-        <button onClick={()=>loginWith({name:"New User",email:`user${Date.now()}@gmail.com`,avatar:"U"})}
-          style={{...btnP,display:"flex",alignItems:"center",justifyContent:"center",gap:10}}>
-          <GoogleIcon/>Continue with a new Google account
+        <p style={{margin:"0 0 32px",color:sub,fontSize:14}}>Build better habits, one day at a time</p>
+        <button onClick={loginWithGoogle}
+          style={{...btnP,display:"flex",alignItems:"center",justifyContent:"center",gap:12,background:card,color:text,border:`1.5px solid ${border}`,padding:"14px 20px"}}>
+          <GoogleIcon/>
+          <span style={{fontWeight:700}}>Continue with Google</span>
         </button>
-        <p style={{fontSize:11,color:sub,marginTop:12}}>* Demo only — no real Google authentication</p>
+        <p style={{fontSize:11,color:sub,marginTop:16}}>Your habits are private and saved to your account</p>
       </div>
     </div>
   );
 
   // ---- ADD/EDIT ----
-  if(screen==="add"&&habitForm) return (
+  if(screen==="add"&&habitForm) return(
     <div style={{minHeight:"100vh",background:bg,fontFamily:"system-ui,sans-serif",maxWidth:480,margin:"0 auto"}}>
       {deleteConfirm&&<DeleteModal {...deleteConfirm}/>}
       <div style={hdrSt}>
@@ -289,33 +281,21 @@ export default function App() {
         <input placeholder="e.g. Morning Run" value={habitForm.name} onChange={e=>setHabitForm(f=>({...f,name:e.target.value}))} style={iStyle}/>
         <label style={labelSt}>Icon</label>
         <div style={{display:"flex",flexWrap:"wrap",gap:8,marginBottom:16}}>
-          {EMOJIS.map(e=>(
-            <button key={e} onClick={()=>setHabitForm(f=>({...f,emoji:e}))}
-              style={{fontSize:22,background:habitForm.emoji===e?"#ede9fe":mutedBg,border:habitForm.emoji===e?"2px solid #6366f1":"2px solid transparent",borderRadius:10,padding:"6px 10px",cursor:"pointer"}}>{e}</button>
-          ))}
+          {EMOJIS.map(e=>(<button key={e} onClick={()=>setHabitForm(f=>({...f,emoji:e}))} style={{fontSize:22,background:habitForm.emoji===e?"#ede9fe":mutedBg,border:habitForm.emoji===e?"2px solid #6366f1":"2px solid transparent",borderRadius:10,padding:"6px 10px",cursor:"pointer"}}>{e}</button>))}
         </div>
         <label style={labelSt}>Color</label>
         <div style={{display:"flex",gap:8,marginBottom:16}}>
-          {COLORS.map(c=>(
-            <button key={c} onClick={()=>setHabitForm(f=>({...f,color:c}))}
-              style={{width:28,height:28,borderRadius:"50%",background:c,border:habitForm.color===c?`3px solid ${text}`:"3px solid transparent",cursor:"pointer"}}/>
-          ))}
+          {COLORS.map(c=>(<button key={c} onClick={()=>setHabitForm(f=>({...f,color:c}))} style={{width:28,height:28,borderRadius:"50%",background:c,border:habitForm.color===c?`3px solid ${text}`:"3px solid transparent",cursor:"pointer"}}/>))}
         </div>
         <label style={labelSt}>Frequency</label>
         <div style={{display:"flex",gap:8,marginBottom:16}}>
-          {FREQ_OPTIONS.map(f=>(
-            <button key={f} onClick={()=>setHabitForm(hf=>({...hf,freq:f}))}
-              style={{padding:"6px 16px",borderRadius:20,border:"none",background:habitForm.freq===f?"#6366f1":mutedBg,color:habitForm.freq===f?"#fff":mutedText,cursor:"pointer",fontWeight:600,fontSize:13}}>{f}</button>
-          ))}
+          {FREQ_OPTIONS.map(f=>(<button key={f} onClick={()=>setHabitForm(hf=>({...hf,freq:f}))} style={{padding:"6px 16px",borderRadius:20,border:"none",background:habitForm.freq===f?"#6366f1":mutedBg,color:habitForm.freq===f?"#fff":mutedText,cursor:"pointer",fontWeight:600,fontSize:13}}>{f}</button>))}
         </div>
         {habitForm.freq==="Custom"&&(
           <>
             <label style={labelSt}>Days</label>
             <div style={{display:"flex",gap:6,marginBottom:16}}>
-              {DAYS.map((d,i)=>(
-                <button key={d} onClick={()=>setHabitForm(f=>({...f,days:f.days.includes(i)?f.days.filter(x=>x!==i):[...f.days,i]}))}
-                  style={{padding:"5px 8px",borderRadius:8,border:"none",background:(habitForm.days||[]).includes(i)?"#6366f1":mutedBg,color:(habitForm.days||[]).includes(i)?"#fff":mutedText,cursor:"pointer",fontSize:12,fontWeight:600}}>{d}</button>
-              ))}
+              {DAYS.map((d,i)=>(<button key={d} onClick={()=>setHabitForm(f=>({...f,days:f.days.includes(i)?f.days.filter(x=>x!==i):[...f.days,i]}))} style={{padding:"5px 8px",borderRadius:8,border:"none",background:(habitForm.days||[]).includes(i)?"#6366f1":mutedBg,color:(habitForm.days||[]).includes(i)?"#fff":mutedText,cursor:"pointer",fontSize:12,fontWeight:600}}>{d}</button>))}
             </div>
           </>
         )}
@@ -332,7 +312,7 @@ export default function App() {
     const h=habits.find(x=>x.id===selected);
     if(!h){setScreen("home");return null;}
     const streak=calcStreak(h.completions),longest=calcLongest(h.completions),total=(h.completions||[]).length;
-    return (
+    return(
       <div style={{minHeight:"100vh",background:bg,fontFamily:"system-ui,sans-serif",maxWidth:480,margin:"0 auto"}}>
         {deleteConfirm&&<DeleteModal {...deleteConfirm}/>}
         <div style={hdrSt}>
@@ -356,15 +336,10 @@ export default function App() {
           <div style={{display:"flex",gap:6,marginBottom:20}}>
             {weekDates.map((dd,i)=>{
               const done=(h.completions||[]).includes(dd),isT=dd===today;
-              return(
-                <div key={dd} style={{flex:1,textAlign:"center"}}>
-                  <div style={{fontSize:11,color:isT?"#6366f1":sub,fontWeight:isT?700:400,marginBottom:4}}>{DAYS[i]}</div>
-                  <div onClick={()=>toggleComplete(h.id,dd)}
-                    style={{width:"100%",aspectRatio:"1",borderRadius:8,background:done?h.color:mutedBg,border:isT?`2px solid ${h.color}`:"2px solid transparent",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",fontSize:14,color:"#fff"}}>
-                    {done?"✓":""}
-                  </div>
-                </div>
-              );
+              return(<div key={dd} style={{flex:1,textAlign:"center"}}>
+                <div style={{fontSize:11,color:isT?"#6366f1":sub,fontWeight:isT?700:400,marginBottom:4}}>{DAYS[i]}</div>
+                <div onClick={()=>toggleComplete(h.id,dd)} style={{width:"100%",aspectRatio:"1",borderRadius:8,background:done?h.color:mutedBg,border:isT?`2px solid ${h.color}`:"2px solid transparent",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",fontSize:14,color:"#fff"}}>{done?"✓":""}</div>
+              </div>);
             })}
           </div>
         </div>
@@ -373,16 +348,16 @@ export default function App() {
   }
 
   // ---- HOME ----
-  return (
+  return(
     <div style={{minHeight:"100vh",background:bg,fontFamily:"system-ui,sans-serif",maxWidth:480,margin:"0 auto",position:"relative"}}>
       <RemarkToast/>
       {deleteConfirm&&<DeleteModal {...deleteConfirm}/>}
       <div style={hdrSt}>
         <div style={{display:"flex",alignItems:"center",gap:10}}>
-          <div style={{width:34,height:34,borderRadius:"50%",background:"#6366f1",color:"#fff",display:"flex",alignItems:"center",justifyContent:"center",fontWeight:700,fontSize:15}}>{session?.avatar}</div>
+          {user.photoURL&&<img src={user.photoURL} style={{width:34,height:34,borderRadius:"50%"}} alt="avatar"/>}
           <div>
-            <div style={{fontWeight:700,fontSize:14,color:text}}>{session?.name}</div>
-            <div style={{fontSize:11,color:sub}}>{session?.email}</div>
+            <div style={{fontWeight:700,fontSize:14,color:text}}>{user.displayName}</div>
+            <div style={{fontSize:11,color:sub}}>{user.email}</div>
           </div>
         </div>
         <div style={{display:"flex",gap:8,alignItems:"center"}}>
@@ -393,20 +368,18 @@ export default function App() {
 
       <div style={{display:"flex",background:card,borderBottom:`1px solid ${border}`,padding:"0 20px"}}>
         {["today","week","dashboard"].map(t=>(
-          <button key={t} onClick={()=>setView(t)}
-            style={{padding:"12px 16px",border:"none",borderBottom:view===t?"2px solid #6366f1":"2px solid transparent",background:"none",color:view===t?"#6366f1":sub,fontWeight:view===t?700:500,fontSize:13,cursor:"pointer"}}>
+          <button key={t} onClick={()=>setView(t)} style={{padding:"12px 16px",border:"none",borderBottom:view===t?"2px solid #6366f1":"2px solid transparent",background:"none",color:view===t?"#6366f1":sub,fontWeight:view===t?700:500,fontSize:13,cursor:"pointer"}}>
             {t==="today"?"Today":t==="week"?"This Week":"📊 Dashboard"}
           </button>
         ))}
       </div>
 
-      {loading ? (
+      {habitsLoading?(
         <div style={{textAlign:"center",padding:"60px 0",color:sub}}>
-          <div style={{fontSize:32,marginBottom:10,animation:"spin 1s linear infinite"}}>⏳</div>
-          <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
+          <div style={{fontSize:32,marginBottom:10}}>⏳</div>
           <p style={{fontSize:14}}>Loading your habits...</p>
         </div>
-      ) : view==="dashboard" ? <Dashboard/> : (
+      ):view==="dashboard"?<Dashboard/>:(
         <div style={{padding:"16px 20px 80px"}}>
           {view==="today"&&(
             <div style={{background:mutedBg,borderRadius:12,padding:"14px 16px",marginBottom:20}}>
@@ -429,52 +402,42 @@ export default function App() {
               ?<div style={{textAlign:"center",padding:"40px 0",color:sub,fontSize:14}}>No habits scheduled for today.</div>
               :todayHabits.map(h=>{
                 const done=(h.completions||[]).includes(today),streak=calcStreak(h.completions);
-                return(
-                  <div key={h.id} style={{background:card,borderRadius:14,padding:"14px 16px",marginBottom:10,display:"flex",alignItems:"center",gap:12,boxShadow:"0 1px 6px #0001",border:done?`1.5px solid ${h.color}`:`1.5px solid ${border}`}}>
-                    <div style={{width:40,height:40,borderRadius:10,background:h.color+"22",display:"flex",alignItems:"center",justifyContent:"center",fontSize:20,flexShrink:0}}>{h.emoji}</div>
-                    <div style={{flex:1,cursor:"pointer"}} onClick={()=>{setSelected(h.id);setScreen("detail");}}>
-                      <div style={{fontWeight:600,fontSize:15,color:text}}>{h.name}</div>
-                      <div style={{fontSize:12,color:sub}}>🔥 {streak} day streak · {h.freq}</div>
-                    </div>
-                    <button onClick={()=>setDeleteConfirm({id:h.id,name:h.name})} style={{background:"none",border:"none",color:"#ef4444",cursor:"pointer",fontSize:18,padding:"0 4px"}}>🗑️</button>
-                    <button onClick={()=>toggleComplete(h.id)}
-                      style={{width:34,height:34,borderRadius:"50%",border:"none",background:done?h.color:mutedBg,color:done?"#fff":sub,fontSize:18,cursor:"pointer",flexShrink:0,display:"flex",alignItems:"center",justifyContent:"center"}}>✓</button>
+                return(<div key={h.id} style={{background:card,borderRadius:14,padding:"14px 16px",marginBottom:10,display:"flex",alignItems:"center",gap:12,boxShadow:"0 1px 6px #0001",border:done?`1.5px solid ${h.color}`:`1.5px solid ${border}`}}>
+                  <div style={{width:40,height:40,borderRadius:10,background:h.color+"22",display:"flex",alignItems:"center",justifyContent:"center",fontSize:20,flexShrink:0}}>{h.emoji}</div>
+                  <div style={{flex:1,cursor:"pointer"}} onClick={()=>{setSelected(h.id);setScreen("detail");}}>
+                    <div style={{fontWeight:600,fontSize:15,color:text}}>{h.name}</div>
+                    <div style={{fontSize:12,color:sub}}>🔥 {streak} day streak · {h.freq}</div>
                   </div>
-                );
+                  <button onClick={()=>setDeleteConfirm({id:h.id,name:h.name})} style={{background:"none",border:"none",color:"#ef4444",cursor:"pointer",fontSize:18,padding:"0 4px"}}>🗑️</button>
+                  <button onClick={()=>toggleComplete(h.id)} style={{width:34,height:34,borderRadius:"50%",border:"none",background:done?h.color:mutedBg,color:done?"#fff":sub,fontSize:18,cursor:"pointer",flexShrink:0,display:"flex",alignItems:"center",justifyContent:"center"}}>✓</button>
+                </div>);
               })
           ):(
             habits.map(h=>{
               const weekDone=weekDates.filter(dd=>(h.completions||[]).includes(dd)).length;
-              return(
-                <div key={h.id} style={{background:card,borderRadius:14,padding:"14px 16px",marginBottom:10,boxShadow:"0 1px 6px #0001"}}>
-                  <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:10}}>
-                    <span style={{fontSize:18}}>{h.emoji}</span>
-                    <span style={{fontWeight:600,fontSize:14,color:text}}>{h.name}</span>
-                    <button onClick={()=>setDeleteConfirm({id:h.id,name:h.name})} style={{background:"none",border:"none",color:"#ef4444",cursor:"pointer",fontSize:16}}>🗑️</button>
-                    <span style={{marginLeft:"auto",fontSize:12,color:sub}}>{weekDone}/7</span>
-                  </div>
-                  <div style={{display:"flex",gap:5}}>
-                    {weekDates.map((dd,i)=>{
-                      const done=(h.completions||[]).includes(dd),isT=dd===today;
-                      return(
-                        <div key={dd} style={{flex:1,textAlign:"center"}}>
-                          <div style={{fontSize:10,color:isT?"#6366f1":sub,marginBottom:3}}>{DAYS[i]}</div>
-                          <div onClick={()=>toggleComplete(h.id,dd)}
-                            style={{height:24,borderRadius:6,background:done?h.color:mutedBg,border:isT?`1.5px solid ${h.color}`:"1.5px solid transparent",cursor:"pointer"}}/>
-                        </div>
-                      );
-                    })}
-                  </div>
+              return(<div key={h.id} style={{background:card,borderRadius:14,padding:"14px 16px",marginBottom:10,boxShadow:"0 1px 6px #0001"}}>
+                <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:10}}>
+                  <span style={{fontSize:18}}>{h.emoji}</span>
+                  <span style={{fontWeight:600,fontSize:14,color:text}}>{h.name}</span>
+                  <button onClick={()=>setDeleteConfirm({id:h.id,name:h.name})} style={{background:"none",border:"none",color:"#ef4444",cursor:"pointer",fontSize:16}}>🗑️</button>
+                  <span style={{marginLeft:"auto",fontSize:12,color:sub}}>{weekDone}/7</span>
                 </div>
-              );
+                <div style={{display:"flex",gap:5}}>
+                  {weekDates.map((dd,i)=>{
+                    const done=(h.completions||[]).includes(dd),isT=dd===today;
+                    return(<div key={dd} style={{flex:1,textAlign:"center"}}>
+                      <div style={{fontSize:10,color:isT?"#6366f1":sub,marginBottom:3}}>{DAYS[i]}</div>
+                      <div onClick={()=>toggleComplete(h.id,dd)} style={{height:24,borderRadius:6,background:done?h.color:mutedBg,border:isT?`1.5px solid ${h.color}`:"1.5px solid transparent",cursor:"pointer"}}/>
+                    </div>);
+                  })}
+                </div>
+              </div>);
             })
           )}
         </div>
       )}
-
       {view!=="dashboard"&&(
-        <button onClick={openAdd}
-          style={{position:"fixed",bottom:28,right:24,width:54,height:54,borderRadius:"50%",background:"#6366f1",color:"#fff",fontSize:28,border:"none",cursor:"pointer",boxShadow:"0 4px 16px #6366f155",display:"flex",alignItems:"center",justifyContent:"center"}}>+</button>
+        <button onClick={openAdd} style={{position:"fixed",bottom:28,right:24,width:54,height:54,borderRadius:"50%",background:"#6366f1",color:"#fff",fontSize:28,border:"none",cursor:"pointer",boxShadow:"0 4px 16px #6366f155",display:"flex",alignItems:"center",justifyContent:"center"}}>+</button>
       )}
     </div>
   );
