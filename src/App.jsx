@@ -20,7 +20,6 @@ const REMARKS = [
   {msg:"🦸 Superhero vibes!",color:"#6366f1"},
 ];
 
-// Preset habit suggestions with icons
 const PRESET_HABITS = [
   {name:"Walking",emoji:"🚶"},
   {name:"Yoga",emoji:"🧘"},
@@ -48,13 +47,9 @@ const getWeekDates = () => {
 };
 const getLast7Days = () => Array.from({length:7},(_,i)=>{const d=new Date();d.setDate(d.getDate()-6+i);return fmtDate(d);});
 const getLast30Days = () => Array.from({length:30},(_,i)=>{const d=new Date();d.setDate(d.getDate()-29+i);return fmtDate(d);});
-const prettyDate = (dateStr) => {
+const shortDate = (dateStr) => {
   const d = new Date(dateStr+"T00:00:00");
-  const today = new Date(); today.setHours(0,0,0,0);
-  const yest = new Date(today); yest.setDate(today.getDate()-1);
-  if(dateStr===fmtDate(today)) return "Today";
-  if(dateStr===fmtDate(yest)) return "Yesterday";
-  return d.toLocaleDateString(undefined,{weekday:"short",month:"short",day:"numeric"});
+  return d.toLocaleDateString(undefined,{weekday:"short",day:"numeric",month:"short"});
 };
 
 const calcStreak = (c=[]) => {
@@ -89,7 +84,7 @@ export default function App() {
   const [showPresetDropdown,setShowPresetDropdown] = useState(false);
   const [showHelp,setShowHelp] = useState(false);
   const [helpStep,setHelpStep] = useState(0);
-  const [activeDate,setActiveDate] = useState(getToday()); // selected day for "today" tab
+  const [activeDate,setActiveDate] = useState(getToday());
   const reminderTimeouts = useRef({});
 
   const bg=dark?"#0f172a":"#f9fafb", card=dark?"#1e293b":"#fff", border=dark?"#334155":"#f3f4f6";
@@ -100,24 +95,15 @@ export default function App() {
     const unsub = onAuthStateChanged(auth, async (u)=>{
       setUser(u);
       setAuthLoading(false);
-      if(u) await loadHabits(u.uid);
-      const seenHelp = u && localStorage_get(`help_seen_${u.uid}`);
+      if(u){
+        const isNew = await loadHabits(u.uid);
+        if(isNew){ setHelpStep(0); setShowHelp(true); }
+      }
     });
     return ()=>unsub();
   },[]);
 
-  // Show help popup for first-time users (per session, safe fallback if no localStorage)
-  function localStorage_get(){ return null; } // placeholder, in-memory only environment
-
   useEffect(()=>{
-    if(user && !habitsLoading && screen==="home"){
-      // show on very first home render
-    }
-  },[user]);
-
-  // Set up reminder notifications
-  useEffect(()=>{
-    // clear old timeouts
     Object.values(reminderTimeouts.current).forEach(t=>clearTimeout(t));
     reminderTimeouts.current = {};
     if(!("Notification" in window)) return;
@@ -142,13 +128,15 @@ export default function App() {
 
   const loadHabits = async (uid) => {
     setHabitsLoading(true);
+    let isNewUser = false;
     try {
       const ref = doc(db,"users",uid);
       const snap = await getDoc(ref);
       if(snap.exists()) setHabits(snap.data().habits || []);
-      else setHabits([]);
+      else { setHabits([]); isNewUser = true; }
     } catch(e){ console.error(e); setHabits([]); }
     setHabitsLoading(false);
+    return isNewUser;
   };
 
   const saveHabitsToDb = async (uid, data) => {
@@ -205,7 +193,7 @@ export default function App() {
     setDeleteConfirm(null); setSelected(null); setScreen("home");
   };
 
-  const openAdd = () => {setHabitForm(emptyForm());setShowPresetDropdown(true);setScreen("add");};
+  const openAdd = () => {setHabitForm(emptyForm());setShowPresetDropdown(false);setScreen("add");};
   const openEdit = (h) => {setHabitForm({...h});setShowPresetDropdown(false);setScreen("add");};
   const pickPreset = (p) => {
     if(p.name==="Custom Habit..."){
@@ -228,6 +216,12 @@ export default function App() {
   const completedActive = activeDueHabits.filter(h=>(h.completions||[]).includes(activeDate)).length;
 
   const last3Days = [2,1,0].map(off=>{const d=new Date();d.setDate(d.getDate()-off);return fmtDate(d);});
+  const dateLabel = (d) => {
+    if(d===today) return "Today";
+    const yest = new Date(); yest.setDate(yest.getDate()-1);
+    if(d===fmtDate(yest)) return "Yesterday";
+    return shortDate(d);
+  };
 
   const iStyle={width:"100%",padding:"10px 14px",borderRadius:10,border:`1.5px solid ${border}`,fontSize:14,marginBottom:14,boxSizing:"border-box",outline:"none",fontFamily:"inherit",background:card,color:text};
   const btnP={width:"100%",padding:12,borderRadius:10,background:"#6366f1",color:"#fff",border:"none",fontWeight:700,fontSize:15,cursor:"pointer"};
@@ -262,7 +256,6 @@ export default function App() {
     </div>
   );
 
-  // ---- HELP / DEMO MODAL ----
   const HELP_STEPS = [
     {icon:"➕",title:"Add a Habit",desc:"Tap the floating + button to create a new habit. Pick from popular presets like Yoga or Walking, or create your own custom one."},
     {icon:"📅",title:"Daily / Weekly / Custom",desc:"Daily = every day. Weekly = once a week (Sunday). Custom = pick exactly which days of the week it repeats."},
@@ -347,7 +340,6 @@ export default function App() {
     );
   };
 
-  // ---- AUTH LOADING ----
   if(authLoading) return(
     <div style={{minHeight:"100vh",background:bg,display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"system-ui,sans-serif"}}>
       <div style={{textAlign:"center",color:sub}}>
@@ -357,7 +349,6 @@ export default function App() {
     </div>
   );
 
-  // ---- LOGIN ----
   if(!user) return(
     <div style={{minHeight:"100vh",background:bg,display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"system-ui,sans-serif",padding:16,boxSizing:"border-box"}}>
       <div style={{background:card,borderRadius:20,padding:"32px 28px",width:"100%",maxWidth:340,boxShadow:"0 4px 24px #0002",textAlign:"center"}}>
@@ -377,7 +368,6 @@ export default function App() {
     </div>
   );
 
-  // ---- ADD/EDIT ----
   if(screen==="add"&&habitForm) return(
     <div style={{minHeight:"100vh",background:bg,fontFamily:"system-ui,sans-serif",maxWidth:480,margin:"0 auto"}}>
       {deleteConfirm&&<DeleteModal {...deleteConfirm}/>}
@@ -456,7 +446,6 @@ export default function App() {
     </div>
   );
 
-  // ---- DETAIL ----
   if(screen==="detail"&&selected){
     const h=habits.find(x=>x.id===selected);
     if(!h){setScreen("home");return null;}
@@ -497,7 +486,6 @@ export default function App() {
     );
   }
 
-  // ---- HOME ----
   return(
     <div style={{minHeight:"100vh",background:bg,fontFamily:"system-ui,sans-serif",maxWidth:480,margin:"0 auto",position:"relative",width:"100%",boxSizing:"border-box"}}>
       <RemarkToast/>
@@ -533,19 +521,18 @@ export default function App() {
         </div>
       ):view==="dashboard"?<Dashboard/>:view==="today"?(
         <div style={{padding:"14px 16px 90px"}}>
-          {/* Date strip for catching up on past days */}
           <div style={{display:"flex",gap:8,marginBottom:16,overflowX:"auto"}}>
             {last3Days.map(d=>(
               <button key={d} onClick={()=>setActiveDate(d)}
                 style={{flexShrink:0,padding:"7px 14px",borderRadius:20,border:"none",background:activeDate===d?"#6366f1":mutedBg,color:activeDate===d?"#fff":mutedText,fontWeight:600,fontSize:12.5,cursor:"pointer",whiteSpace:"nowrap"}}>
-                {prettyDate(d)}
+                {dateLabel(d)}
               </button>
             ))}
           </div>
 
           <div style={{background:mutedBg,borderRadius:12,padding:"14px 16px",marginBottom:20}}>
             <div style={{display:"flex",justifyContent:"space-between",marginBottom:8}}>
-              <span style={{fontSize:13,fontWeight:600,color:mutedText}}>{prettyDate(activeDate)}'s Progress</span>
+              <span style={{fontSize:13,fontWeight:600,color:mutedText}}>{dateLabel(activeDate)}'s Progress</span>
               <span style={{fontSize:13,fontWeight:700,color:"#6366f1"}}>{completedActive}/{activeDueHabits.length}</span>
             </div>
             <div style={{height:6,background:border,borderRadius:99}}>
@@ -559,7 +546,7 @@ export default function App() {
               <p style={{fontSize:14}}>No habits yet — tap + to add your first one!</p>
             </div>
           ):activeDueHabits.length===0?(
-            <div style={{textAlign:"center",padding:"40px 0",color:sub,fontSize:14}}>No habits scheduled for {prettyDate(activeDate).toLowerCase()}.</div>
+            <div style={{textAlign:"center",padding:"40px 0",color:sub,fontSize:14}}>No habits scheduled for {dateLabel(activeDate)==="Today"?"today":dateLabel(activeDate)}.</div>
           ):activeDueHabits.map(h=>{
             const done=(h.completions||[]).includes(activeDate),streak=calcStreak(h.completions);
             return(<div key={h.id} style={{background:card,borderRadius:14,padding:"12px 14px",marginBottom:10,display:"flex",alignItems:"center",gap:10,boxShadow:"0 1px 6px #0001",border:done?`1.5px solid ${h.color}`:`1.5px solid ${border}`}}>
